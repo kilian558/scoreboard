@@ -1,0 +1,16 @@
+# .gitignore
+
+# Python
+*.pyc
+*.pyo
+__pycache__/
+
+# Env
+.env
+
+# Logs/JSON-Dateien (falls privat)
+*.json
+
+# Andere
+.vscode/
+.idea/

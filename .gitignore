@@ -1,16 +1,36 @@
-# .gitignore
-
 # Python
-*.pyc
-*.pyo
 __pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
 
-# Env
+# Virtualenv
+.venv/
+venv/
+ENV/
+env/
+
+# dotenv
 .env
+.env.*
 
-# Logs/JSON-Dateien (falls privat)
-*.json
-
-# Andere
+# IDEs
 .vscode/
 .idea/
+*.iml
+
+# Logs
+*.log
+
+# Runtime/Cache
+*.pid
+*.sqlite3
+
+# Local data files (bot state)
+multi_ranking_message_ids.json
+monthly_stats.json
+last_log_ids.json

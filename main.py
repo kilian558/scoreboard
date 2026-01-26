@@ -28,6 +28,10 @@ LAST_LOG_FILE = 'last_log_ids.json'  # Last id per server
 
 bot = commands.Bot(command_prefix='!', intents=discord.Intents.default())
 
+# NEW: Scheduler-Guard
+scheduler = AsyncIOScheduler()
+scheduler_started = False
+
 def load_message_ids():
     try:
         with open(MESSAGE_FILE, 'r') as f:
@@ -228,9 +232,13 @@ def create_ranking_embed(ranking_def, stats, update_time):
 
 @bot.event
 async def on_ready():
+    global scheduler_started
+    if scheduler_started:
+        return
+    scheduler_started = True
+
     print(f'Bot online als {bot.user}')
-    scheduler = AsyncIOScheduler()
-    scheduler.add_job(update_all_rankings, 'interval', seconds=60, next_run_time=datetime.datetime.now())
+    scheduler.add_job(update_all_rankings, 'interval', seconds=60)
     scheduler.start()
     await update_all_rankings()
 

@@ -26,6 +26,7 @@ SERVERS = [
 MESSAGE_FILE = 'multi_ranking_message_ids.json'
 STATS_FILE = 'monthly_stats.json'  # Kumulative Stats diesen Monat
 LAST_LOG_FILE = 'last_log_ids.json'  # Last id per server
+FREEZE_TRACKER_FILE = 'last_freeze_date.json'  # Track when freeze last happened
 
 VIENNA_TZ = ZoneInfo("Europe/Vienna")
 
@@ -106,7 +107,20 @@ def save_last_log_ids(ids):
 
 last_log_ids = load_last_log_ids()
 
-connect_times = defaultdict(lambda: None)  # player_id: connect_timestamp
+def load_freeze_tracker():
+    try:
+        with open(FREEZE_TRACKER_FILE, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+def save_freeze_tracker(data):
+    with open(FREEZE_TRACKER_FILE, 'w') as f:
+        json.dump(data, f)
+
+freeze_tracker = load_freeze_tracker()
+
+connect_times = {}  # player_id: connect_timestamp
 
 def fetch_historical_logs(server):
     try:
@@ -177,10 +191,10 @@ def update_stats():
                 elif 'CONNECT' in log_type or 'CONNECTED' in log_type:
                     connect_times[killer_id] = ts
                 elif 'DISCONNECT' in log_type or 'DISCONNECTED' in log_type:
-                    if connect_times[killer_id]:
+                    if killer_id in connect_times and connect_times[killer_id]:
                         duration = (ts - connect_times[killer_id]).total_seconds() / 60
                         s['playtime_min'] += max(0, duration)
-                        connect_times[killer_id] = None
+                        del connect_times[killer_id]
 
     # K/D berechnen
     for s in current_stats.values():
@@ -192,10 +206,13 @@ def update_stats():
 
 def is_new_month():
     today = now_vienna().date()
-    return today.day == 1
+    today_str = today.isoformat()
+    if today.day == 1 and freeze_tracker.get('last_freeze_date') != today_str:
+        return True
+    return False
 
 async def freeze_and_reset_stats(channel):
-    global current_stats
+    global current_stats, freeze_tracker
     # Post finales Ranking
     month = (now_vienna().date() - datetime.timedelta(days=1)).strftime('%B %Y')
     embed = discord.Embed(title=f"Finales Ranking {month}", color=0x00ff00)
@@ -208,8 +225,12 @@ async def freeze_and_reset_stats(channel):
 
     await channel.send(embed=embed)
 
+    # Mark freeze as done
+    freeze_tracker['last_freeze_date'] = now_vienna().date().isoformat()
+    save_freeze_tracker(freeze_tracker)
+
     # Reset Stats
-    current_stats = defaultdict(lambda: {'kills': 0, 'deaths': 0, 'teamkills': 0, 'teamkill_deaths': 0, 'longest_streak': 0, 'current_streak': 0, 'playtime_min': 0, 'name': ''})
+    current_stats.clear()
     save_stats(current_stats)
 
 async def update_all_rankings():
@@ -240,14 +261,18 @@ async def update_all_rankings():
             new_ids.append(msg.id)
         except Exception as e:
             print(f"Discord-Fehler {ranking['title']}: {e}")
-            new_ids.append(None)
+            # Keep old message_id if it exists
+            if len(message_ids) > idx and message_ids[idx]:
+                new_ids.append(message_ids[idx])
+            else:
+                new_ids.append(None)
         await asyncio.sleep(1)  # Länger Delay to avoid rate limits
     message_ids = new_ids
     save_message_ids(message_ids)
 
 RANKINGS = [
     {'title': '🔫 Meiste Kills', 'key': 'kills', 'format': '{:,}', 'reverse': True},
-    {'title': '💀 Beste K/D (≥1 Kill)', 'key': 'kd', 'format': '{:.2f}', 'reverse': True},
+    {'title': '💀 Beste K/D (≥1 Kill)', 'key': 'kd', 'format': '{:.2f}', 'reverse': True, 'min_filter': lambda s: s['kills'] >= 1},
     {'title': '🔥 Längste Killstreak', 'key': 'longest_streak', 'format': '{}', 'reverse': True},
     {'title': '🤦 Meiste Teamkills', 'key': 'teamkills', 'format': '{}', 'reverse': True},
     {'title': '😭 Am meisten geteamkillt', 'key': 'teamkill_deaths', 'format': '{}', 'reverse': True},

@@ -34,3 +34,4 @@ env/
 multi_ranking_message_ids.json
 monthly_stats.json
 last_log_ids.json
+last_freeze_date.json

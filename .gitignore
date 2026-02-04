@@ -1,12 +1,32 @@
+# Environment variables
+.env
+.env.*
+.env.local
+.env.production
+
 # Python
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*$py.class
 *.so
+.Python
 *.egg-info/
-dist/
+.installed.cfg
+*.egg
 build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
 
 # Virtualenv
 .venv/
@@ -14,23 +34,31 @@ venv/
 ENV/
 env/
 
-# dotenv
-.env
-.env.*
-
 # IDEs
 .vscode/
 .idea/
 *.iml
+*.swp
+*.swo
+*~
 
 # Logs
+logs/
 *.log
 
-# Runtime/Cache
+# PM2
+.pm2/
+pids/
 *.pid
+*.seed
+*.pid.lock
+
+# Runtime/Cache
 *.sqlite3
 
-# Local data files (bot state)
-multi_ranking_message_ids.json
-monthly_stats.json
-last_log_ids.json
+# Data files (bot state)
+data/*.json
+
+# OS
+.DS_Store
+Thumbs.db

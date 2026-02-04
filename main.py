@@ -7,9 +7,28 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncio
 from dotenv import load_dotenv
 import os
+import sys
+import signal
+import logging
 from collections import defaultdict
+from zoneinfo import ZoneInfo
+from pathlib import Path
 
 load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger('DiscordBot')
+
+# Ensure data directory exists
+DATA_DIR = Path('data')
+DATA_DIR.mkdir(exist_ok=True)
 
 BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID'))
@@ -22,15 +41,45 @@ SERVERS = [
     # {'name': 'Server 3', 'url': os.getenv('CRCON_URL_SERVER3') + '/api/', 'headers': {'Authorization': f'Bearer {CRCON_TOKEN}'}},
 ]
 
-MESSAGE_FILE = 'multi_ranking_message_ids.json'
-STATS_FILE = 'monthly_stats.json'  # Kumulative Stats diesen Monat
-LAST_LOG_FILE = 'last_log_ids.json'  # Last id per server
+MESSAGE_FILE = DATA_DIR / 'multi_ranking_message_ids.json'
+STATS_FILE = DATA_DIR / 'monthly_stats.json'  # Kumulative Stats diesen Monat
+LAST_LOG_FILE = DATA_DIR / 'last_log_ids.json'  # Last id per server
+
+VIENNA_TZ = ZoneInfo("Europe/Vienna")
 
 bot = commands.Bot(command_prefix='!', intents=discord.Intents.default())
 
 # NEW: Scheduler-Guard
 scheduler = AsyncIOScheduler()
 scheduler_started = False
+
+def now_vienna():
+    return datetime.datetime.now(VIENNA_TZ)
+
+def parse_log_timestamp(ts_str):
+    if not ts_str:
+        return None
+
+    # Standardformat (z. B. 2025-01-26 17:13:48)
+    try:
+        dt = datetime.datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
+        return dt.replace(tzinfo=VIENNA_TZ)
+    except ValueError:
+        pass
+
+    # Format aus Logs: "17:13:48, Jan 26"
+    try:
+        dt = datetime.datetime.strptime(ts_str, '%H:%M:%S, %b %d')
+        now = now_vienna()
+        dt = dt.replace(year=now.year, tzinfo=VIENNA_TZ)
+        # Falls Log vom Vorjahr (z. B. Dezember in Januar)
+        if dt > now + datetime.timedelta(days=1):
+            dt = dt.replace(year=now.year - 1)
+        return dt
+    except ValueError:
+        pass
+
+    return None
 
 def load_message_ids():
     try:
@@ -85,10 +134,13 @@ def fetch_historical_logs(server):
         resp.raise_for_status()
         data = resp.json()
         logs = data.get('result', [])
-        print(f"[LOGS] {server['name']}: {len(logs)} Logs erhalten")
+        logger.info(f"[LOGS] {server['name']}: {len(logs)} Logs erhalten")
         return logs
+    except requests.RequestException as e:
+        logger.error(f"[ERROR] {server['name']} - Request failed: {e}")
+        return []
     except Exception as e:
-        print(f"[ERROR] {server['name']}: {e}")
+        logger.error(f"[ERROR] {server['name']} - Unexpected error: {e}", exc_info=True)
         return []
 
 def update_stats():
@@ -103,19 +155,27 @@ def update_stats():
             save_last_log_ids(last_log_ids)
 
             for log in new_logs:
-                log_type = log.get('type', '').upper()
-                killer_id = log.get('player1_id')
+                log_type_raw = (log.get('type') or log.get('event') or log.get('action') or '').upper()
+                message = (log.get('message') or log.get('content') or '').upper()
+
+                log_type = log_type_raw
+                if not log_type:
+                    log_type = message
+
+                killer_id = log.get('player1_id') or log.get('player_id')
                 killer_name = log.get('player1_name') or log.get('player_name')
                 victim_id = log.get('player2_id')
                 victim_name = log.get('player2_name') or log.get('victim_name')
+
                 if not killer_id:
                     continue
 
-                ts_str = log.get('time') or log.get('timestamp')  # Adjust key if needed
-                ts = datetime.datetime.now() if not ts_str else datetime.datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')  # Adjust format if needed
+                ts_str = log.get('time') or log.get('timestamp')
+                ts = parse_log_timestamp(ts_str) or now_vienna()
 
                 s = current_stats[killer_id]
                 s['name'] = killer_name or s['name']
+
                 if 'KILL' in log_type and 'TEAM KILL' not in log_type:
                     s['kills'] += 1
                     s['current_streak'] += 1
@@ -135,9 +195,9 @@ def update_stats():
                 elif 'DEATH' in log_type:
                     s['deaths'] += 1
                     s['current_streak'] = 0
-                elif 'CONNECT' in log_type:
+                elif 'CONNECT' in log_type or 'CONNECTED' in log_type:
                     connect_times[killer_id] = ts
-                elif 'DISCONNECT' in log_type:
+                elif 'DISCONNECT' in log_type or 'DISCONNECTED' in log_type:
                     if connect_times[killer_id]:
                         duration = (ts - connect_times[killer_id]).total_seconds() / 60
                         s['playtime_min'] += max(0, duration)
@@ -148,17 +208,17 @@ def update_stats():
         s['kd'] = s['kills'] / max(1, s['deaths'])
 
     save_stats(current_stats)
-    print(f"[STATS] Updated – Gesamt Spieler: {len(current_stats)}")
+    logger.info(f"[STATS] Updated – Gesamt Spieler: {len(current_stats)}")
     return dict(current_stats)
 
 def is_new_month():
-    today = datetime.date.today()
+    today = now_vienna().date()
     return today.day == 1
 
 async def freeze_and_reset_stats(channel):
     global current_stats
     # Post finales Ranking
-    month = (datetime.date.today() - datetime.timedelta(days=1)).strftime('%B %Y')
+    month = (now_vienna().date() - datetime.timedelta(days=1)).strftime('%B %Y')
     embed = discord.Embed(title=f"Finales Ranking {month}", color=0x00ff00)
     embed.description = "Stats des abgelaufenen Monats (gefreezt)"
 
@@ -175,11 +235,16 @@ async def freeze_and_reset_stats(channel):
 
 async def update_all_rankings():
     global message_ids
-    all_stats = update_stats()
-    now = datetime.datetime.now()
+    try:
+        all_stats = update_stats()
+    except Exception as e:
+        logger.error(f"Failed to update stats: {e}", exc_info=True)
+        return
+    
+    now = now_vienna()
     channel = bot.get_channel(CHANNEL_ID)
     if not channel:
-        print("Channel nicht gefunden!")
+        logger.warning("Channel nicht gefunden!")
         return
 
     if is_new_month():
@@ -199,8 +264,11 @@ async def update_all_rankings():
         except discord.NotFound:
             msg = await channel.send(embed=embed)
             new_ids.append(msg.id)
+        except discord.errors.HTTPException as e:
+            logger.error(f"Discord HTTP Error {ranking['title']}: {e}")
+            new_ids.append(None)
         except Exception as e:
-            print(f"Discord-Fehler {ranking['title']}: {e}")
+            logger.error(f"Discord-Fehler {ranking['title']}: {e}", exc_info=True)
             new_ids.append(None)
         await asyncio.sleep(1)  # Länger Delay to avoid rate limits
     message_ids = new_ids
@@ -227,7 +295,7 @@ def create_ranking_embed(ranking_def, stats, update_time):
 
     text = "\n".join(f"{i+1:2}. **{s['name'][:20]}** – {ranking_def['format'].format(ranking_def.get('value_func', lambda v: v)(s[ranking_def['key']]))}" for i, (id, s) in enumerate(sorted_players))
     embed.add_field(name="Top 30", value=text, inline=False)
-    embed.set_footer(text="Monatlich reset | get_historical_logs")
+    embed.set_footer(text=f"{update_time.strftime('%B %Y')} | Monatlich reset")
     return embed
 
 @bot.event
@@ -237,9 +305,36 @@ async def on_ready():
         return
     scheduler_started = True
 
-    print(f'Bot online als {bot.user}')
+    logger.info(f'Bot online als {bot.user}')
     scheduler.add_job(update_all_rankings, 'interval', seconds=60)
     scheduler.start()
     await update_all_rankings()
 
-bot.run(BOT_TOKEN)
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully"""
+    logger.info(f"Received signal {signum}, shutting down gracefully...")
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
+    asyncio.create_task(bot.close())
+
+def main():
+    """Main entry point with signal handling"""
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    try:
+        logger.info("Starting Discord Bot...")
+        bot.run(BOT_TOKEN)
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
+    finally:
+        if scheduler.running:
+            scheduler.shutdown(wait=False)
+        logger.info("Bot shutdown complete")
+
+if __name__ == "__main__":
+    main()
